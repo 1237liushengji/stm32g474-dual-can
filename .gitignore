@@ -1,0 +1,13 @@
+# Keil MDK 构建产物（输出目录/用户界面状态/依赖缓存）
+G474/MDK-ARM/G474/
+*.uvguix.*
+*.bak
+*.dep
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# 上位机生成的报文记录
+tools/can_log_*.csv
