@@ -305,6 +305,16 @@ python can_console.py -p COM5     # 连接（COM号换成实际值）
 3. `/send 456 DE AD BE EF`手动注入一帧，对端sniff立刻显示；
 4. 拔线演示bus-off自动恢复，`stats`里busOff/errPas计数增长可讲错误状态机。
 
+## 8.5 驱动工程化特性（feature/driver-refactor分支）
+
+| 特性 | 说明 | 观察方法 |
+|------|------|------|
+| RX无锁环形缓冲 | 16深度SPSC：中断只写写指针、主循环只读写指针，DMB屏障保证发布顺序 | `stats`的`ovr`持续为0（高负载才可能增长） |
+| 发送确认 | Tx Event FIFO + MessageMarker对账，逐帧确认"真正送达总线"并测延迟 | `stats`新增行：`txAck`应≈`tx`，`txMaxLatency`为最大入队→确认延迟(ms) |
+| bus-off指数退避 | 1s起步翻倍、上限30s；任一帧确认成功即复位退避（避免重连风暴） | 断线期间`busOff`增长但节奏递减；恢复通信后退避自动复位 |
+| 独立看门狗IWDG | LSI/32=1kHz、3s超时，主循环喂狗；调试器halt时冻结 | 主循环卡死3s内自动复位（可注释喂狗语句实验） |
+| 上电自检 | 内部回环自发自收验证FDCAN软件链路，不驱动总线 | 上电串口第二行`CAN self-test: PASS` |
+
 ## 9. 参考资料
 
 * ST官方示例（本工程驱动模式来源）：

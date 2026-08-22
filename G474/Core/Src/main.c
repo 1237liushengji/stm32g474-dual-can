@@ -74,6 +74,8 @@ static uint32_t  s_lastErrBlinkTick;               /* LED2错误指示闪烁节�
 static uint32_t  s_errTick;                        /* 最近一次总线错误事件时刻 */
 static uint32_t  s_errTotalLast;                   /* 上次统计的错误总数快照 */
 static uint8_t   s_errActive;                      /* 错误指示窗口激活标志 */
+
+static IWDG_HandleTypeDef hiwdg;                   /* 独立看门狗：LSI/32=1kHz，重装载3s */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -302,6 +304,26 @@ int main(void)
     Error_Handler();
   }
 
+  /* 上电自检：内部回环自发自收，验证FDCAN内核+消息RAM+中断+驱动软件链路 */
+  if (CAN_SelfTest())
+  {
+    BSP_UART_Send("CAN self-test: PASS\r\n", 21U);
+  }
+  else
+  {
+    BSP_UART_Send("CAN self-test: FAIL\r\n", 21U);
+  }
+
+  /* 独立看门狗：主循环喂狗；调试器halt时冻结计数，断点调试不误复位 */
+  DBGMCU->APB1FZR1 |= DBGMCU_APB1FZR1_DBG_IWDG_STOP;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_32;        /* LSI 32kHz/32 = 1kHz */
+  hiwdg.Init.Reload    = 3000U;                    /* 3s超时（含裕量） */
+  hiwdg.Init.Window    = IWDG_WINDOW_DISABLE;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   s_bootTick    = HAL_GetTick();
   s_lastCmdTick = s_bootTick;
   s_lastRespTick = s_bootTick;
@@ -314,6 +336,8 @@ int main(void)
   {
     App_Process();
     Console_Task();                                /* 串口命令行控制台 */
+    CAN_Task();                                    /* bus-off指数退避恢复调度 */
+    HAL_IWDG_Refresh(&hiwdg);                      /* 喂狗（主循环健康证明） */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

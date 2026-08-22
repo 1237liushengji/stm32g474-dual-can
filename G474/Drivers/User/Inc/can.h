@@ -78,9 +78,11 @@ typedef struct
 typedef struct
 {
   volatile uint32_t txCount;                /* 成功写入Tx FIFO的帧数 */
+  volatile uint32_t txAckCount;             /* 经Tx Event FIFO确认送达总线的帧数 */
+  volatile uint32_t txMaxLatencyMs;         /* 入队到总线确认的最大延迟（ms） */
   volatile uint32_t rxCount;                /* 成功接收的帧数 */
   volatile uint32_t txErrors;               /* 发送失败次数（FIFO满等） */
-  volatile uint32_t rxOverruns;             /* 接收信箱覆盖/报文丢失次数 */
+  volatile uint32_t rxOverruns;             /* 接收环形缓冲覆盖/报文丢失次数 */
   volatile uint32_t busOffCount;            /* 总线关闭（bus-off）发生次数 */
   volatile uint32_t errPassiveCount;        /* 进入/退出错误被动状态事件次数 */
   volatile uint32_t protocolErrors;         /* 协议类错误中断次数 */
@@ -102,6 +104,16 @@ const CAN_Stats  *CAN_GetStats(void);
 HAL_StatusTypeDef CAN_SetBitrate(uint32_t bitrate);
 HAL_StatusTypeDef CAN_SetPromiscuous(bool enable);
 uint32_t          CAN_GetBitrate(void);
+
+/* 驱动工程化（阶段1）：
+ * CAN_Task   —— 主循环周期调用：调度bus-off指数退避恢复（1s起步翻倍，
+ *               上限30s；任一帧发送确认成功即复位退避），避免错误状态下
+ *               立即重连风暴；
+ * CAN_SelfTest —— 上电自检：临时切入内部回环自发自收一帧测试报文，
+ *               验证"FDCAN内核+消息RAM+中断+收发路径"软件链路完整，
+ *               不驱动总线引脚（内部回环含总线监测模式）。 */
+void CAN_Task(void);
+bool CAN_SelfTest(void);
 
 /*--------------------------------------- 载荷编解码 --------------------------------------*/
 /**

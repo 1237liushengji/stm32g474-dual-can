@@ -213,6 +213,8 @@ static void Cmd_Stats(void)
                   (unsigned long)st->txErrors, (unsigned long)st->rxOverruns,
                   (unsigned long)st->busOffCount, (unsigned long)st->errPassiveCount,
                   (unsigned long)st->protocolErrors);
+  BSP_UART_Printf("txAck=%lu txMaxLatency=%lums\r\n",
+                  (unsigned long)st->txAckCount, (unsigned long)st->txMaxLatencyMs);
 }
 
 /**

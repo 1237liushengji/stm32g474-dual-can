@@ -5,13 +5,17 @@
   *
   * 设计说明（企业级要求）：
   *   1. 发送采用Tx FIFO（深度3），发送前查询剩余空间，不阻塞应用层；
-  *   2. 接收采用RX FIFO0 + FDCAN2中断线0，回调中排空FIFO后写入单槽信箱，
-  *      应用层通过CAN_PollRx()轮询取走（临界区保护，避免与中断竞争）；
-  *   3. 激活bus-off/错误被动中断，bus-off后自动 Stop->Start 完成总线恢复
-  *      （M_CAN进入bus-off时硬件自动置INIT位，Stop/Start序列即完成恢复）；
-  *   4. 所有HAL返回值均检查并统计，异常不静默；
+  *      发送启用Tx Event FIFO（MessageMarker标记），中断里逐帧确认
+  *      "已真正送达总线"并测量入队->确认延迟（txAckCount/txMaxLatencyMs）；
+  *   2. 接收采用RX FIFO0 + FDCAN2中断线0，回调中排空FIFO写入16深度
+  *      无锁SPSC环形缓冲（中断只写写指针、主循环只读写指针，Cortex-M
+  *      单核下配合DMB屏障安全），应用层CAN_PollRx()轮询取走；
+  *   3. bus-off采用指数退避自动恢复：1s起步翻倍、上限30s（CAN_Task调度），
+  *      任一帧发送确认成功即复位退避——避免故障总线上的重连风暴；
+  *   4. 上电自检CAN_SelfTest()：内部回环自发自收，验证软件链路完整性；
   *   5. 支持运行时重配置（CAN_Configure）：波特率切换、混杂模式切换，
-  *      重配置流程 = Stop -> 重填参数 -> Init -> 过滤器 -> Start -> 重挂中断。
+  *      重配置流程 = Stop -> 重填参数 -> Init -> 过滤器 -> Start -> 重挂中断；
+  *   6. 所有HAL返回值均检查并统计，异常不静默。
   *
   * 参考实现：STMicroelectronics/STM32CubeG4 官方示例
   *           Projects/STM32G474E-EVAL/Examples/FDCAN/FDCAN_Classic_Frame_Networking
@@ -25,16 +29,29 @@
   */
 #include "can.h"
 
+/*--------------------------------------- 模块配置 --------------------------------------*/
+#define CAN_RX_RING_LEN       16U                     /* 接收环形缓冲深度（2的幂，取模优化） */
+#define CAN_BUSOFF_BACKOFF_MIN_MS   1000U             /* bus-off恢复起始退避 */
+#define CAN_BUSOFF_BACKOFF_MAX_MS   30000U            /* bus-off恢复退避上限 */
+
 /*--------------------------------------- 模块内部变量 --------------------------------------*/
 FDCAN_HandleTypeDef hfdcan2;                          /* FDCAN2句柄（中断服务函数引用） */
 
-static CAN_RxMsg    s_rxMailbox;                      /* 单槽接收信箱 */
-static volatile uint8_t s_rxPending;                  /* 信箱数据待取标志 */
+static CAN_RxMsg    s_rxRing[CAN_RX_RING_LEN];        /* 接收环形缓冲 */
+static volatile uint8_t s_rxW;                        /* 写索引（仅接收中断修改） */
+static volatile uint8_t s_rxR;                        /* 读索引（仅主循环修改） */
+
+static uint32_t     s_txTick[256];                    /* MessageMarker -> 入队时刻（测延迟） */
+static uint8_t      s_txMarker;                       /* 下一帧的MessageMarker */
 
 static CAN_Stats    s_stats;                          /* 通信统计（调试器可观察） */
 
 static bool         s_promisc;                        /* 混杂模式：接收所有ID */
+static bool         s_loopbackSelfTest;               /* 运行时自检：内部回环 */
 static uint32_t     s_bitrate = CAN_BITRATE;          /* 当前位速率 */
+
+static volatile uint32_t s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS; /* 当前退避时长 */
+static volatile uint32_t s_busOffDueTick;             /* 待执行的恢复时刻（0=无待恢复） */
 
 /* 波特率-分频查找表：FDCAN内核时钟=PCLK1=150MHz，所有档位统一
  * 10tq/位、采样点80%、SJW=2：位速率 = 150MHz / (prescaler × 10)
@@ -67,6 +84,7 @@ static uint32_t CAN_BitrateToPrescaler(uint32_t bitrate)
 
 /**
   * @brief  FDCAN2完整配置流程（初始化与运行时重配置共用）
+  * @note   仅允许主循环上下文调用；重配置后环形缓冲复位（此时已停机，无RX中断竞争）
   * @retval HAL状态
   */
 static HAL_StatusTypeDef CAN_Configure(void)
@@ -95,9 +113,16 @@ static HAL_StatusTypeDef CAN_Configure(void)
   hfdcan2.Init.ClockDivider                   = FDCAN_CLOCK_DIV1;
   hfdcan2.Init.FrameFormat                    = FDCAN_FRAME_CLASSIC;
 #if (CAN_DEBUG_SELFTEST != 0)
-  hfdcan2.Init.Mode                           = FDCAN_MODE_EXTERNAL_LOOPBACK; /* 自测试：自发自收 */
+  hfdcan2.Init.Mode                           = FDCAN_MODE_EXTERNAL_LOOPBACK; /* 调试自测试：自发自收且驱动总线脚 */
 #else
-  hfdcan2.Init.Mode                           = FDCAN_MODE_NORMAL;
+  if (s_loopbackSelfTest)
+  {
+    hfdcan2.Init.Mode                         = FDCAN_MODE_INTERNAL_LOOPBACK; /* 上电自检：内部回环不驱动总线脚 */
+  }
+  else
+  {
+    hfdcan2.Init.Mode                         = FDCAN_MODE_NORMAL;
+  }
 #endif
   hfdcan2.Init.AutoRetransmission             = ENABLE;   /* 硬件自动重发，保证可靠送达 */
   hfdcan2.Init.TransmitPause                  = DISABLE;
@@ -120,18 +145,18 @@ static HAL_StatusTypeDef CAN_Configure(void)
     return status;
   }
 
-  /* 接收过滤器：混杂模式收全部；正常模式只收对端报文（掩码0x7FF精确匹配） */
+  /* 接收过滤器：混杂/自检模式收全部；正常模式只收对端报文（掩码0x7FF精确匹配） */
   filterConfig.IdType       = FDCAN_STANDARD_ID;
   filterConfig.FilterIndex  = 0U;
   filterConfig.FilterType   = FDCAN_FILTER_MASK;
   filterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
 #if (CAN_DEBUG_SELFTEST != 0)
-  filterConfig.FilterID1    = 0x000U;                 /* 自测试：掩码0，接收所有ID */
+  filterConfig.FilterID1    = 0x000U;                 /* 调试自测试：掩码0，接收所有ID */
   filterConfig.FilterID2    = 0x000U;
 #else
-  if (s_promisc)
+  if (s_promisc || s_loopbackSelfTest)
   {
-    filterConfig.FilterID1  = 0x000U;                 /* 混杂模式：掩码0，接收所有标准ID */
+    filterConfig.FilterID1  = 0x000U;                 /* 混杂/自检：掩码0，接收所有标准ID */
     filterConfig.FilterID2  = 0x000U;
   }
   else
@@ -151,8 +176,8 @@ static HAL_StatusTypeDef CAN_Configure(void)
     return status;
   }
 
-  /* 全局过滤器：混杂模式下非匹配标准/扩展帧一并收入RX FIFO0；正常模式全部拒绝 */
-  if (s_promisc)
+  /* 全局过滤器：混杂/自检模式下非匹配标准/扩展帧一并收入RX FIFO0；正常模式全部拒绝 */
+  if (s_promisc || s_loopbackSelfTest)
   {
     status = HAL_FDCAN_ConfigGlobalFilter(&hfdcan2, FDCAN_ACCEPT_IN_RX_FIFO0,
                                           FDCAN_ACCEPT_IN_RX_FIFO0,
@@ -174,8 +199,15 @@ static HAL_StatusTypeDef CAN_Configure(void)
     return status;
   }
 
-  /* 接收新报文中断 + 总线错误状态中断（V1.2.3中断线由ILS复位值决定，均走中断线0） */
+  /* 接收新报文 + Tx事件确认 + 总线错误状态中断（V1.2.3中断线由ILS复位值决定，均走中断线0） */
   status = HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+  status = HAL_FDCAN_ActivateNotification(&hfdcan2,
+                                          FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
+                                          0U);
   if (status != HAL_OK)
   {
     return status;
@@ -186,6 +218,10 @@ static HAL_StatusTypeDef CAN_Configure(void)
     return status;
   }
 
+  /* 已停机，无RX中断竞争，复位环形缓冲 */
+  s_rxR = 0U;
+  s_rxW = 0U;
+
   return HAL_OK;
 }
 
@@ -195,9 +231,76 @@ static HAL_StatusTypeDef CAN_Configure(void)
   */
 HAL_StatusTypeDef CAN_Init(void)
 {
-  s_bitrate = CAN_BITRATE;
-  s_promisc = false;
+  s_bitrate         = CAN_BITRATE;
+  s_promisc         = false;
+  s_loopbackSelfTest = false;
+  s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;
+  s_busOffDueTick   = 0U;
   return CAN_Configure();
+}
+
+/**
+  * @brief  上电自检：内部回环自发自收一帧（不驱动总线引脚）
+  * @retval true=软件链路完整；false=自检失败
+  */
+bool CAN_SelfTest(void)
+{
+  const uint8_t testPayload[CAN_PAYLOAD_LEN] = {0x5AU, 0xA5U, 0x3CU, 0xC3U, 0, 0, 0, 0};
+  bool          ok = false;
+  CAN_RxMsg     msg;
+  uint32_t      start;
+
+  s_loopbackSelfTest = true;
+  if (CAN_Configure() != HAL_OK)
+  {
+    s_loopbackSelfTest = false;
+    (void)CAN_Configure();                           /* 尽力恢复正常模式 */
+    return false;
+  }
+
+  if (CAN_Send(0x1F5U, testPayload, 4U) == HAL_OK)
+  {
+    start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 100U)           /* 自检超时100ms */
+    {
+      if (CAN_PollRx(&msg))
+      {
+        ok = (msg.id == 0x1F5U) && (msg.len == 4U) &&
+             (msg.data[0] == 0x5AU) && (msg.data[1] == 0xA5U);
+        break;
+      }
+    }
+  }
+
+  s_loopbackSelfTest = false;
+  (void)CAN_Configure();                             /* 恢复正常模式 */
+  return ok;
+}
+
+/**
+  * @brief  主循环周期任务：调度bus-off指数退避恢复
+  * @note   恢复动作（Stop->Start）放在主循环而非中断，避免中断里做耗时操作
+  */
+void CAN_Task(void)
+{
+  if ((s_busOffDueTick != 0U) && ((int32_t)(HAL_GetTick() - s_busOffDueTick) >= 0))
+  {
+    s_busOffDueTick = 0U;
+
+    if (HAL_FDCAN_Stop(&hfdcan2) == HAL_OK)
+    {
+      (void)HAL_FDCAN_Start(&hfdcan2);
+      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U);
+      (void)HAL_FDCAN_ActivateNotification(&hfdcan2,
+                                          FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
+                                          0U);
+      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_BUS_OFF | FDCAN_IT_ERROR_PASSIVE, 0U);
+    }
+    else
+    {
+      s_busOffDueTick = HAL_GetTick() + 100U;        /* Stop失败：100ms后重试 */
+    }
+  }
 }
 
 /**
@@ -246,6 +349,7 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
   FDCAN_TxHeaderTypeDef txHeader;
   uint8_t               txData[CAN_PAYLOAD_LEN] = {0U};  /* 零填充暂存区：驱动按字(4字节)拷贝，
                                                            防止len<8时读越界 */
+  uint8_t               marker;
 
   if ((data == NULL) || (len > CAN_PAYLOAD_LEN) ||
       (stdId > 0x7FFU))
@@ -265,6 +369,9 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
     txData[i] = data[i];
   }
 
+  marker = ++s_txMarker;                        /* 1~255循环标记（Tx Event回读对账） */
+  s_txTick[marker] = HAL_GetTick();             /* 入队时刻，用于确认延迟测量 */
+
   txHeader.Identifier          = stdId;
   txHeader.IdType              = FDCAN_STANDARD_ID;
   txHeader.TxFrameType         = FDCAN_DATA_FRAME;
@@ -273,8 +380,8 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
   txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
   txHeader.BitRateSwitch       = FDCAN_BRS_OFF;
   txHeader.FDFormat            = FDCAN_CLASSIC_CAN;        /* 经典CAN帧 */
-  txHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
-  txHeader.MessageMarker       = 0U;
+  txHeader.TxEventFifoControl  = FDCAN_STORE_TX_EVENTS;    /* 存Tx事件供发送确认 */
+  txHeader.MessageMarker       = marker;
 
   if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData) != HAL_OK)
   {
@@ -289,27 +396,34 @@ HAL_StatusTypeDef CAN_Send(uint32_t stdId, const uint8_t *data, uint8_t len)
 /**
   * @brief  轮询取走一帧接收报文（主循环调用）
   * @param  msg 输出报文
-  * @retval true取到一帧；false信箱为空
+  * @retval true取到一帧；false缓冲为空
+  * @note   无锁SPSC：读方仅触碰s_rxR，写方（中断）仅触碰s_rxW；先拷贝数据
+  *         再推进读索引，写方先写数据再推进写索引，配合屏障保证可见性顺序。
   */
 bool CAN_PollRx(CAN_RxMsg *msg)
 {
-  bool gotMsg = false;
+  uint8_t r;
+  uint8_t w;
 
   if (msg == NULL)
   {
     return false;
   }
 
-  __disable_irq();                              /* 与接收中断竞争信箱，需短暂关中断 */
-  if (s_rxPending != 0U)
-  {
-    *msg = s_rxMailbox;
-    s_rxPending = 0U;
-    gotMsg = true;
-  }
-  __enable_irq();
+  w = s_rxW;                                   /* 先快照写索引 */
+  __DMB();                                     /* 确保读到最新数据前的索引可见性 */
+  r = s_rxR;
 
-  return gotMsg;
+  if (r == w)
+  {
+    return false;
+  }
+
+  *msg = s_rxRing[r];                          /* 读取方独占该槽位 */
+  __DMB();
+  s_rxR = (uint8_t)((r + 1U) & (CAN_RX_RING_LEN - 1U));
+
+  return true;
 }
 
 /**
@@ -321,7 +435,7 @@ const CAN_Stats *CAN_GetStats(void)
 }
 
 /**
-  * @brief  RX FIFO0接收回调（中断上下文）：排空FIFO写入信箱
+  * @brief  RX FIFO0接收回调（中断上下文）：排空FIFO写入环形缓冲
   */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
@@ -333,20 +447,28 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     /* 循环排空FIFO，避免高负载下滞留 */
     while (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK)
     {
-      if (s_rxPending != 0U)
-      {
-        s_stats.rxOverruns++;                   /* 上一帧未被取走被覆盖 */
-      }
+      uint8_t w     = s_rxW;
+      uint8_t next  = (uint8_t)((w + 1U) & (CAN_RX_RING_LEN - 1U));
 
-      s_rxMailbox.id        = rxHeader.Identifier;
-      s_rxMailbox.timestamp = rxHeader.RxTimestamp;
-      /* V1.2.3的DataLength为原始DLC：经典帧DLC>8时有效字节仍为8 */
-      s_rxMailbox.len       = (rxHeader.DataLength > 8U) ? 8U : (uint8_t)rxHeader.DataLength;
-      for (uint8_t i = 0U; i < s_rxMailbox.len; i++)
+      if (next == s_rxR)
       {
-        s_rxMailbox.data[i] = rxData[i];
+        s_stats.rxOverruns++;                   /* 环形缓冲满：本帧丢弃并统计 */
       }
-      s_rxPending = 1U;
+      else
+      {
+        CAN_RxMsg *slot = &s_rxRing[w];
+
+        slot->id        = rxHeader.Identifier;
+        slot->timestamp = rxHeader.RxTimestamp;
+        /* V1.2.3的DataLength为原始DLC：经典帧DLC>8时有效字节仍为8 */
+        slot->len       = (rxHeader.DataLength > 8U) ? 8U : (uint8_t)rxHeader.DataLength;
+        for (uint8_t i = 0U; i < slot->len; i++)
+        {
+          slot->data[i] = rxData[i];
+        }
+        __DMB();                               /* 先写数据后发布索引 */
+        s_rxW = next;
+      }
       s_stats.rxCount++;
     }
   }
@@ -358,12 +480,44 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 }
 
 /**
-  * @brief  总线错误状态回调（中断上下文）：bus-off自动恢复
-  * @note   M_CAN发生bus-off时硬件自动置位INIT进入初始化状态；
-  *         Stop(状态回READY) -> Start(清INIT)序列即完成自动恢复，随后重挂中断。
+  * @brief  Tx事件回调（中断上下文）：逐帧确认送达并测量延迟
+  * @note   任一帧确认成功即认为总线恢复健康，bus-off退避时长复位
+  */
+void HAL_FDCAN_TxEventFifoCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t TxEventFifoITs)
+{
+  FDCAN_TxEventFifoTypeDef txEvent;
+
+  if ((TxEventFifoITs & FDCAN_IT_TX_EVT_FIFO_NEW_DATA) != 0U)
+  {
+    while (HAL_FDCAN_GetTxEvent(hfdcan, &txEvent) == HAL_OK)
+    {
+      uint32_t latency = HAL_GetTick() - s_txTick[txEvent.MessageMarker];
+
+      s_stats.txAckCount++;
+      if (latency > s_stats.txMaxLatencyMs)
+      {
+        s_stats.txMaxLatencyMs = latency;       /* 入队->总线确认最大延迟 */
+      }
+
+      s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;  /* 总线健康：复位退避 */
+    }
+  }
+
+  if ((TxEventFifoITs & FDCAN_IT_TX_EVT_FIFO_ELT_LOST) != 0U)
+  {
+    s_stats.protocolErrors++;                   /* 事件FIFO溢出（极少发生） */
+  }
+}
+
+/**
+  * @brief  总线错误状态回调（中断上下文）：计数 + 登记退避恢复
+  * @note   M_CAN进入bus-off时硬件自动置位INIT离线；真正的Stop->Start恢复
+  *         由主循环CAN_Task在退避时间到后执行（不在中断里做）。
   */
 void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorStatusITs)
 {
+  UNUSED(hfdcan);
+
   if ((ErrorStatusITs & FDCAN_IT_ERROR_PASSIVE) != 0U)
   {
     s_stats.errPassiveCount++;                 /* 进入/退出错误被动状态（总线异常的早期信号） */
@@ -373,11 +527,12 @@ void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorSt
   {
     s_stats.busOffCount++;
 
-    if (HAL_FDCAN_Stop(hfdcan) == HAL_OK)
+    /* 指数退避：1s->2s->4s->...->30s封顶 */
+    s_busOffDueTick = HAL_GetTick() + s_busOffBackoffMs;
+    s_busOffBackoffMs *= 2U;
+    if (s_busOffBackoffMs > CAN_BUSOFF_BACKOFF_MAX_MS)
     {
-      (void)HAL_FDCAN_Start(hfdcan);
-      (void)HAL_FDCAN_ActivateNotification(hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0U);
-      (void)HAL_FDCAN_ActivateNotification(hfdcan, FDCAN_IT_BUS_OFF | FDCAN_IT_ERROR_PASSIVE, 0U);
+      s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MAX_MS;
     }
   }
 }
