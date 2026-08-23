@@ -106,18 +106,14 @@ static void App_HandleResp(void)
   s_linkEverOk   = 1U;
   s_bLedState    = (s_rxMsg.data[1] != 0U) ? 1U : 0U;
 
-  if (s_bLedState != 0U)                        /* LED与板B保持同步 */
-  {
-    LED1_ON;
-  }
-  else
-  {
-    LED1_OFF;
-  }
+  GPIOE->BSRR = (s_bLedState != 0U) ? GPIO_BSRR_BR0 : GPIO_BSRR_BS0;  /* 低电平点亮 */
 }
 
 /**
   * @brief  从节点侧：处理命令帧（ID 0x321）——翻转LED并立即应答
+  * @note   LED采用"软件状态为唯一真相+BSRR原子直写"：低电平点亮，state=1时
+  *         写BR0(复位)，state=0时写BS0(置位)。不再使用读-改-写式翻转与
+  *         引脚读回（排查sniff下TogglePin写入不保持的问题）。
   */
 static void App_HandleCmd(void)
 {
@@ -126,8 +122,8 @@ static void App_HandleCmd(void)
   s_linkEverOk  = 1U;
   s_rxCmdCount++;
 
-  LED1_Toggle;                                   /* 每收到一帧命令，LED翻转一次 */
-  s_bLedState = (HAL_GPIO_ReadPin(LED1_PORT, LED1_PIN) == GPIO_PIN_RESET) ? 1U : 0U;
+  s_bLedState ^= 1U;                                    /* 状态翻转（软件真相） */
+  GPIOE->BSRR = (s_bLedState != 0U) ? GPIO_BSRR_BR0 : GPIO_BSRR_BS0;
 
   CAN_EncodeResp(s_rxMsg.data, s_rxMsg.data[0], s_bLedState, s_rxCmdCount);
   (void)CAN_Send(CAN_ID_RESP_B2A, s_rxMsg.data, CAN_PAYLOAD_LEN);
@@ -305,7 +301,7 @@ int main(void)
 
   BSP_UART_Init();                                 /* 控制台串口 USART1 PA9/PA10 115200 8N1 */
   Console_Init();                                  /* 打印横幅，等待命令 */
-  BSP_UART_Send("main: sniff-parallel M2\r\n", 27U); /* main.c构建指纹：无此行=烧的旧main.o */
+  BSP_UART_Send("main: led-bsrr-state M3\r\n", 24U); /* main.c构建指纹：无此行=烧的旧main.o */
 
   if (CAN_Init() != HAL_OK)                        /* FDCAN2 + 过滤器 + 中断 + 启动 */
   {
