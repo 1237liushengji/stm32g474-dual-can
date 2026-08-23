@@ -43,6 +43,7 @@ static void Cmd_Bitrate(char *args);
 static void Cmd_Sniff(char *args);
 static void Cmd_Send(char *args);
 static void Cmd_Led(void);
+static void Cmd_Tick(void);
 
 /**
   * @brief  输出字符串（按实际长度）
@@ -168,6 +169,10 @@ static void Console_Execute(char *line)
   {
     Cmd_Led();
   }
+  else if (strcmp(cmd, "tick") == 0)
+  {
+    Cmd_Tick();
+  }
   else
   {
     BSP_UART_Printf("unknown cmd: %s (try 'help')\r\n", cmd);
@@ -222,6 +227,9 @@ static void Cmd_Stats(void)
                   (unsigned long)st->txEvtLost, (unsigned long)st->protocolErrors);
   BSP_UART_Printf("txAck=%lu txMaxLatency=%lums\r\n",
                   (unsigned long)st->txAckCount, (unsigned long)st->txMaxLatencyMs);
+  BSP_UART_Printf("dbg poll=%lu hx=%lu cmd=%lu resp=%lu (poll应=rx, cmd/resp应随帧增长)\r\n",
+                  (unsigned long)g_dbgPoll, (unsigned long)g_dbgHx,
+                  (unsigned long)g_dbgCmd, (unsigned long)g_dbgResp);
 }
 
 /**
@@ -333,6 +341,21 @@ static void Cmd_Send(char *args)
 bool Console_SniffEnabled(void)
 {
   return s_sniffOn;
+}
+
+/**
+  * @brief  tick命令：以100ms间隔连续采样PE0电平10次（消除采样混叠，
+  *         直接观察1Hz的LED翻转是否存在）
+  */
+static void Cmd_Tick(void)
+{
+  Put("sampling PE0 (bit0 of ODR) every 100ms x10:\r\n");
+  for (uint8_t i = 0U; i < 10U; i++)
+  {
+    BSP_UART_Printf("t%d=%lu ", (int)i, (unsigned long)(GPIOE->ODR & 1UL));
+    HAL_Delay(100U);
+  }
+  Put("\r\n");
 }
 
 /**

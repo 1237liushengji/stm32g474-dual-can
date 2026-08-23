@@ -20,4 +20,10 @@ void Console_Task(void);
 bool Console_SniffEnabled(void);
 void Console_PrintFrame(const CAN_RxMsg *msg);
 
+/* main.c中的调试计数器（定位sniff下协议分发路径是否执行） */
+extern uint32_t g_dbgPoll;                         /* CAN_PollRx取到帧次数 */
+extern uint32_t g_dbgHx;                           /* App_HandleRx调用次数 */
+extern uint32_t g_dbgCmd;                          /* App_HandleCmd调用次数 */
+extern uint32_t g_dbgResp;                         /* App_HandleResp调用次数 */
+
 #endif /* __CONSOLE_H */

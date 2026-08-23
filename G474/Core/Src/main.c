@@ -76,6 +76,12 @@ static uint32_t  s_errTotalLast;                   /* 上次统计的错误总�
 static uint8_t   s_errActive;                      /* 错误指示窗口激活标志 */
 
 static IWDG_HandleTypeDef hiwdg;                   /* 独立看门狗：LSI/32=1kHz，重装载3s */
+
+/* 调试计数器（定位sniff下LED冻结：观察协议分发路径是否执行） */
+uint32_t g_dbgHx;                                  /* App_HandleRx调用次数 */
+uint32_t g_dbgCmd;                                 /* App_HandleCmd调用次数 */
+uint32_t g_dbgResp;                                /* App_HandleResp调用次数 */
+uint32_t g_dbgPoll;                                /* CAN_PollRx取到帧次数 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -95,6 +101,7 @@ static void App_Process(void);
   */
 static void App_HandleResp(void)
 {
+  g_dbgResp++;
   s_lastRespTick = HAL_GetTick();
   s_linkEverOk   = 1U;
   s_bLedState    = (s_rxMsg.data[1] != 0U) ? 1U : 0U;
@@ -114,6 +121,7 @@ static void App_HandleResp(void)
   */
 static void App_HandleCmd(void)
 {
+  g_dbgCmd++;
   s_lastCmdTick = HAL_GetTick();
   s_linkEverOk  = 1U;
   s_rxCmdCount++;
@@ -130,6 +138,7 @@ static void App_HandleCmd(void)
   */
 static void App_HandleRx(void)
 {
+  g_dbgHx++;
 #if (CAN_DEBUG_SELFTEST != 0)
   /* 单板自测试：回环收到自己发的命令帧，同时扮演两个节点 */
   if (s_rxMsg.id == CAN_ID_CMD_A2B)
@@ -169,6 +178,7 @@ static void App_Process(void)
   /* 1. 取走并处理接收报文：监视模式下"打印+协议处理"并行——观察不打扰业务 */
   if (CAN_PollRx(&s_rxMsg))
   {
+    g_dbgPoll++;
     if (Console_SniffEnabled())
     {
       Console_PrintFrame(&s_rxMsg);
