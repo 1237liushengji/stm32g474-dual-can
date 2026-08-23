@@ -26,6 +26,9 @@ static uint32_t s_lastActivityTick;              /* S3计时基准 */
 static uint32_t s_pendingTick;                   /* 客户端：已发请求等待应答的时刻 */
 static bool     s_pendingResp;
 
+static bool     s_clientExtended;                /* 客户端镜像：服务器处于扩展会话 */
+static uint32_t s_lastTpTick;                    /* 上次TesterPresent时刻 */
+
 /*--------------------------------------- 内部工具 --------------------------------------*/
 static void Uds_SendResp(const uint8_t *resp, uint16_t len)
 {
@@ -277,6 +280,21 @@ void Uds_ClientOnMsg(const uint8_t *rsp, uint16_t len)
 {
   s_pendingResp = false;
 
+  /* 会话镜像：0x10的正/负应答更新客户端会话认知 */
+  if ((len == 6U) && (rsp[0] == 0x50U))
+  {
+    s_clientExtended = (rsp[1] == UDS_SESSION_EXTENDED);
+    s_lastTpTick     = HAL_GetTick();
+  }
+  else if ((len == 3U) && (rsp[0] == 0x7FU) && (rsp[1] == 0x10U))
+  {
+    s_clientExtended = false;
+  }
+  else
+  {
+    /* 其他应答 */
+  }
+
   BSP_UART_Printf("diag<< (%u bytes):", (unsigned)len);
   for (uint16_t i = 0U; i < len; i++)
   {
@@ -331,6 +349,8 @@ void Uds_Init(void)
   s_session = UDS_SESSION_DEFAULT;
   s_lastActivityTick = HAL_GetTick();
   s_pendingResp = false;
+  s_clientExtended = false;
+  s_lastTpTick = HAL_GetTick();
 
 #if (CAN_NODE_ROLE == CAN_NODE_A)
   IsoTp_Init(ISOTP_DIAG_RESP_ID, ISOTP_DIAG_REQ_ID,
@@ -360,5 +380,14 @@ void Uds_Task(void)
   {
     s_pendingResp = false;
     BSP_UART_Send("diag: response timeout\r\n", 25U);
+  }
+
+  /* 客户端：扩展会话期间每2s发TesterPresent(3E 80抑制正应答)保活S3，
+   * 与真实诊断仪（CANoe/PCAN-Diag）的做法一致；不经pending流程（无应答为正常） */
+  if (s_clientExtended && ((now - s_lastTpTick) >= 2000U))
+  {
+    uint8_t tp[2] = {0x3EU, 0x80U};
+    s_lastTpTick = now;
+    (void)IsoTp_Send(tp, 2U);
   }
 }
