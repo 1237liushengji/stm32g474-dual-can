@@ -208,11 +208,11 @@ static void Cmd_Stats(void)
   BSP_UART_Printf("uptime=%lus bitrate=%lubps\r\n",
                   (unsigned long)(HAL_GetTick() / 1000U),
                   (unsigned long)CAN_GetBitrate());
-  BSP_UART_Printf("tx=%lu rx=%lu txErr=%lu ovr=%lu busOff=%lu errPas=%lu protoErr=%lu\r\n",
+  BSP_UART_Printf("tx=%lu rx=%lu txErr=%lu ovr=%lu busOff=%lu errPas=%lu txEvtLost=%lu protoErr=%lu\r\n",
                   (unsigned long)st->txCount, (unsigned long)st->rxCount,
                   (unsigned long)st->txErrors, (unsigned long)st->rxOverruns,
                   (unsigned long)st->busOffCount, (unsigned long)st->errPassiveCount,
-                  (unsigned long)st->protocolErrors);
+                  (unsigned long)st->txEvtLost, (unsigned long)st->protocolErrors);
   BSP_UART_Printf("txAck=%lu txMaxLatency=%lums\r\n",
                   (unsigned long)st->txAckCount, (unsigned long)st->txMaxLatencyMs);
 }

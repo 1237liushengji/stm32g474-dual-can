@@ -166,17 +166,14 @@ static void App_Process(void)
 {
   uint32_t now = HAL_GetTick();
 
-  /* 1. 取走并处理接收信箱中的报文：监视模式打印报文，正常模式走协议处理 */
+  /* 1. 取走并处理接收报文：监视模式下"打印+协议处理"并行——观察不打扰业务 */
   if (CAN_PollRx(&s_rxMsg))
   {
     if (Console_SniffEnabled())
     {
       Console_PrintFrame(&s_rxMsg);
     }
-    else
-    {
-      App_HandleRx();
-    }
+    App_HandleRx();
   }
 
   /* 2. 总线错误指示（LED2绿色）：出现bus-off/错误被动事件后5秒内以250ms闪烁。

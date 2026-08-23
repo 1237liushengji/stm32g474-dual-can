@@ -205,9 +205,20 @@ static HAL_StatusTypeDef CAN_Configure(void)
   {
     return status;
   }
+  /* Tx事件确认三件套：
+   * 1) TEFNE：新事件写入通知（排空事件FIFO、对账MessageMarker）；
+   * 2) TX_COMPLETE + BufferIndexes=0x07：使能3个Tx缓冲区的传输完成中断，
+   *    V1.2.3的HAL据此置TXBTIE寄存器——G4精简FDCAN IP在TXBTIE未使能时
+   *    事件FIFO写入处于未授权状态，会导致每次发送误报TEFL（元素丢失）；
+   * 3) TEFL：真实丢失时的告警（正常应为0）。 */
   status = HAL_FDCAN_ActivateNotification(&hfdcan2,
                                           FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
                                           0U);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+  status = HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_TX_COMPLETE, 0x07U);
   if (status != HAL_OK)
   {
     return status;
@@ -294,6 +305,7 @@ void CAN_Task(void)
       (void)HAL_FDCAN_ActivateNotification(&hfdcan2,
                                           FDCAN_IT_TX_EVT_FIFO_NEW_DATA | FDCAN_IT_TX_EVT_FIFO_ELT_LOST,
                                           0U);
+      (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_TX_COMPLETE, 0x07U);
       (void)HAL_FDCAN_ActivateNotification(&hfdcan2, FDCAN_IT_BUS_OFF | FDCAN_IT_ERROR_PASSIVE, 0U);
     }
     else
@@ -505,7 +517,7 @@ void HAL_FDCAN_TxEventFifoCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t TxEvent
 
   if ((TxEventFifoITs & FDCAN_IT_TX_EVT_FIFO_ELT_LOST) != 0U)
   {
-    s_stats.protocolErrors++;                   /* 事件FIFO溢出（极少发生） */
+    s_stats.txEvtLost++;                        /* 事件FIFO溢出丢失（真实丢失，正常应为0） */
   }
 }
 

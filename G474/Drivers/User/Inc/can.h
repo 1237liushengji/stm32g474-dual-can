@@ -85,6 +85,7 @@ typedef struct
   volatile uint32_t rxOverruns;             /* 接收环形缓冲覆盖/报文丢失次数 */
   volatile uint32_t busOffCount;            /* 总线关闭（bus-off）发生次数 */
   volatile uint32_t errPassiveCount;        /* 进入/退出错误被动状态事件次数 */
+  volatile uint32_t txEvtLost;              /* Tx事件FIFO元素丢失次数（正常应为0） */
   volatile uint32_t protocolErrors;         /* 协议类错误中断次数 */
 } CAN_Stats;
 
