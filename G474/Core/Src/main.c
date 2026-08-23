@@ -316,6 +316,7 @@ int main(void)
 
   /* 独立看门狗：主循环喂狗；调试器halt时冻结计数，断点调试不误复位 */
   DBGMCU->APB1FZR1 |= DBGMCU_APB1FZR1_DBG_IWDG_STOP;
+  hiwdg.Instance     = IWDG;                       /* HAL经Instance访问寄存器，必须赋值（漏赋=空指针HardFault） */
   hiwdg.Init.Prescaler = IWDG_PRESCALER_32;        /* LSI 32kHz/32 = 1kHz */
   hiwdg.Init.Reload    = 3000U;                    /* 3s超时（含裕量） */
   hiwdg.Init.Window    = IWDG_WINDOW_DISABLE;
