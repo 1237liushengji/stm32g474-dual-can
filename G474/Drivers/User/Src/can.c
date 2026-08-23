@@ -483,6 +483,11 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
       }
       s_stats.rxCount++;
     }
+
+    /* 排空后最后一次GetRxMessage必然返回FIFO_EMPTY并粘滞置位ErrorCode；
+     * V1.2.3的IRQHandler在每次中断结尾检查ErrorCode!=0即误调ErrorCallback，
+     * 必须在此主动清除（否则协议错误计数按中断频率虚增） */
+    hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
   }
 
   if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_MESSAGE_LOST) != 0U)
@@ -513,6 +518,9 @@ void HAL_FDCAN_TxEventFifoCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t TxEvent
 
       s_busOffBackoffMs = CAN_BUSOFF_BACKOFF_MIN_MS;  /* 总线健康：复位退避 */
     }
+
+    /* 同Rx排空：清除GetTxEvent排空后粘滞的FIFO_EMPTY错误码，防ErrorCallback误报 */
+    hfdcan->ErrorCode = HAL_FDCAN_ERROR_NONE;
   }
 
   if ((TxEventFifoITs & FDCAN_IT_TX_EVT_FIFO_ELT_LOST) != 0U)
