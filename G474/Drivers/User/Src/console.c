@@ -344,15 +344,15 @@ bool Console_SniffEnabled(void)
 }
 
 /**
-  * @brief  tick命令：以100ms间隔连续采样PE0电平10次（消除采样混叠，
-  *         直接观察1Hz的LED翻转是否存在）
+  * @brief  tick命令：以100ms间隔连续采样PE0电平30次（3秒=3个翻转周期，
+  *         不可能漏采边沿），直接观察LED翻转是否存在
   */
 static void Cmd_Tick(void)
 {
-  Put("sampling PE0 (bit0 of ODR) every 100ms x10:\r\n");
-  for (uint8_t i = 0U; i < 10U; i++)
+  Put("sampling PE0 (bit0 of ODR) every 100ms x30:\r\n");
+  for (uint8_t i = 0U; i < 30U; i++)
   {
-    BSP_UART_Printf("t%d=%lu ", (int)i, (unsigned long)(GPIOE->ODR & 1UL));
+    BSP_UART_Printf("%lu", (unsigned long)(GPIOE->ODR & 1UL));
     HAL_Delay(100U);
   }
   Put("\r\n");
@@ -367,16 +367,17 @@ static void Cmd_Tick(void)
   */
 static void Cmd_Led(void)
 {
-  BSP_UART_Printf("before MODER=%08lX ODR=%08lX IDR=%08lX AHB2ENR=%08lX\r\n",
-                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->ODR,
-                  (unsigned long)GPIOE->IDR,   (unsigned long)RCC->AHB2ENR);
+  BSP_UART_Printf("before MODER=%08lX OTYPER=%08lX ODR=%08lX IDR=%08lX AHB2ENR=%08lX\r\n",
+                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->OTYPER,
+                  (unsigned long)GPIOE->ODR,   (unsigned long)GPIOE->IDR,
+                  (unsigned long)RCC->AHB2ENR);
 
   LED1_Toggle;
   LED2_Toggle;
 
-  BSP_UART_Printf("after  MODER=%08lX ODR=%08lX IDR=%08lX (PE0/PE1应翻转)\r\n",
-                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->ODR,
-                  (unsigned long)GPIOE->IDR);
+  BSP_UART_Printf("after  MODER=%08lX OTYPER=%08lX ODR=%08lX IDR=%08lX (PE0/PE1应翻转)\r\n",
+                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->OTYPER,
+                  (unsigned long)GPIOE->ODR,   (unsigned long)GPIOE->IDR);
 }
 
 /**
