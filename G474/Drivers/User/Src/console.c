@@ -20,6 +20,7 @@
   */
 #include "console.h"
 #include "bsp_uart.h"
+#include "led.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -41,6 +42,7 @@ static void Cmd_Stats(void);
 static void Cmd_Bitrate(char *args);
 static void Cmd_Sniff(char *args);
 static void Cmd_Send(char *args);
+static void Cmd_Led(void);
 
 /**
   * @brief  输出字符串（按实际长度）
@@ -162,6 +164,10 @@ static void Console_Execute(char *line)
   {
     Cmd_Send(args);
   }
+  else if (strcmp(cmd, "led") == 0)
+  {
+    Cmd_Led();
+  }
   else
   {
     BSP_UART_Printf("unknown cmd: %s (try 'help')\r\n", cmd);
@@ -180,6 +186,7 @@ static void Console_PrintHelp(void)
   Put("  bitrate <kbps>     125/250/500/1000, switch on BOTH nodes\r\n");
   Put("  sniff <on|off>     bus monitor mode\r\n");
   Put("  send <id> [b0..b7] send frame, hex, e.g. send 321 11 22\r\n");
+  Put("  led                LED/GPIOE diagnose: regs + toggle test\r\n");
 }
 
 /**
@@ -326,6 +333,27 @@ static void Cmd_Send(char *args)
 bool Console_SniffEnabled(void)
 {
   return s_sniffOn;
+}
+
+/**
+  * @brief  led命令：LED/GPIOE寄存器诊断（定位LED冻结问题）
+  * @note   每次执行翻转LED1/LED2并打印关键寄存器：
+  *         MODER（模式，输出=01）、ODR（输出锁存）、IDR（引脚实际电平）、
+  *         RCC_AHB2ENR（bit4=GPIOE时钟）。MODER/ODR正常变化而LED不亮
+  *         => 引脚/LED电气问题；MODER被改 => 有代码在动GPIOE。
+  */
+static void Cmd_Led(void)
+{
+  BSP_UART_Printf("before MODER=%08lX ODR=%08lX IDR=%08lX AHB2ENR=%08lX\r\n",
+                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->ODR,
+                  (unsigned long)GPIOE->IDR,   (unsigned long)RCC->AHB2ENR);
+
+  LED1_Toggle;
+  LED2_Toggle;
+
+  BSP_UART_Printf("after  MODER=%08lX ODR=%08lX IDR=%08lX (PE0/PE1应翻转)\r\n",
+                  (unsigned long)GPIOE->MODER, (unsigned long)GPIOE->ODR,
+                  (unsigned long)GPIOE->IDR);
 }
 
 /**
