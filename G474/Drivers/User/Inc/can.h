@@ -27,7 +27,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define CAN_APP_VERSION                "2.0.0"       /* 应用固件版本（version命令上报） */
+#define CAN_APP_VERSION                "3.0.0"       /* 应用固件版本（version命令上报） */
 
 /*--------------------------------------- 节点角色配置 --------------------------------------*
  * 双机通信两个节点烧录不同固件：                                                          *

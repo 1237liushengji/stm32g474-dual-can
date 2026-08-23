@@ -21,6 +21,7 @@
 #include "console.h"
 #include "bsp_uart.h"
 #include "led.h"
+#include "uds.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -50,6 +51,9 @@ static void Cmd_Sniff(char *args);
 static void Cmd_Send(char *args);
 static void Cmd_Led(void);
 static void Cmd_Tick(void);
+#if (CAN_NODE_ROLE == CAN_NODE_A)
+static void Cmd_Diag(char *args);
+#endif
 
 /**
   * @brief  输出字符串（按实际长度）
@@ -196,6 +200,12 @@ static void Console_Execute(char *line)
   {
     Cmd_Tick();
   }
+#if (CAN_NODE_ROLE == CAN_NODE_A)
+  else if (strcmp(cmd, "diag") == 0)
+  {
+    Cmd_Diag(args);
+  }
+#endif
   else
   {
     BSP_UART_Printf("unknown cmd: %s (try 'help')\r\n", cmd);
@@ -215,6 +225,9 @@ static void Console_PrintHelp(void)
   Put("  sniff <on|off>     bus monitor mode\r\n");
   Put("  send <id> [b0..b7] send frame, hex, e.g. send 321 11 22\r\n");
   Put("  led                LED/GPIOE diagnose: regs + toggle test\r\n");
+#if (CAN_NODE_ROLE == CAN_NODE_A)
+  Put("  diag <cmd>         UDS diagnostics: ver/up/stat/dtc/ext/def/tp/led 0|1/raw ..\r\n");
+#endif
 }
 
 /**
@@ -365,6 +378,97 @@ bool Console_SniffEnabled(void)
 {
   return s_sniffOn;
 }
+
+#if (CAN_NODE_ROLE == CAN_NODE_A)
+/**
+  * @brief  diag命令（UDS诊断仪，仅板A）：构造诊断请求经ISO-TP发往板B
+  *  diag ver   读版本DID F000（多帧应答，验证ISO-TP）
+  *  diag up    读运行时间DID F001
+  *  diag stat  读通信统计DID F002
+  *  diag dtc   读DTC（0x19 01）
+  *  diag ext / def  进扩展会话(10 03)/回默认会话(10 01)
+  *  diag tp    TesterPresent
+  *  diag led <0|1>  写LED（需先diag ext，S3超时5s内执行）
+  *  diag raw <hex>  自定义请求
+  */
+static void Cmd_Diag(char *args)
+{
+  uint8_t  req[8];
+  uint16_t len = 0U;
+
+  if ((args == NULL) || (*args == '\0'))
+  {
+    Put("usage: diag ver|up|stat|dtc|ext|def|tp|led 0|1|raw <hex>\r\n");
+    return;
+  }
+
+  if      (strncmp(args, "ver",  3U) == 0U) { req[0]=0x22U; req[1]=0xF0U; req[2]=0x00U; len=3U; }
+  else if (strncmp(args, "up",   2U) == 0U) { req[0]=0x22U; req[1]=0xF0U; req[2]=0x01U; len=3U; }
+  else if (strncmp(args, "stat", 4U) == 0U) { req[0]=0x22U; req[1]=0xF0U; req[2]=0x02U; len=3U; }
+  else if (strncmp(args, "dtc",  3U) == 0U) { req[0]=0x19U; req[1]=0x01U; req[2]=0xFFU; len=3U; }
+  else if (strncmp(args, "ext",  3U) == 0U) { req[0]=0x10U; req[1]=0x03U;               len=2U; }
+  else if (strncmp(args, "def",  3U) == 0U) { req[0]=0x10U; req[1]=0x01U;               len=2U; }
+  else if (strncmp(args, "tp",   2U) == 0U) { req[0]=0x3EU; req[1]=0x00U;               len=2U; }
+  else if (strncmp(args, "led",  3U) == 0U)
+  {
+    int v = -1;
+    if ((args[4U] == '1')) { v = 1; }
+    else if ((args[4U] == '0')) { v = 0; }
+    if (v < 0)
+    {
+      Put("usage: diag led <0|1> (run 'diag ext' first, S3=5s)\r\n");
+      return;
+    }
+    req[0]=0x2EU; req[1]=0xF0U; req[2]=0x10U; req[3]=(uint8_t)v; len=4U;
+  }
+  else if (strncmp(args, "raw", 3U) == 0U)
+  {
+    char *tok;
+    uint8_t n = 0U;
+    char *hexArgs = (args[3U] == ' ') ? &args[4U] : NULL;
+    if (hexArgs == NULL)
+    {
+      Put("usage: diag raw 22 F0 00\r\n");
+      return;
+    }
+    tok = strtok(hexArgs, " ");
+    while ((tok != NULL) && (n < 8U))
+    {
+      long v = strtol(tok, NULL, 16);
+      if ((v < 0L) || (v > 0xFFL))
+      {
+        Put("hex byte range 00..FF\r\n");
+        return;
+      }
+      req[n++] = (uint8_t)v;
+      tok = strtok(NULL, " ");
+    }
+    len = n;
+    if (len == 0U)
+    {
+      Put("usage: diag raw 22 F0 00\r\n");
+      return;
+    }
+  }
+  else
+  {
+    Put("unknown diag cmd\r\n");
+    return;
+  }
+
+  BSP_UART_Printf("diag>>");
+  for (uint16_t i = 0U; i < len; i++)
+  {
+    BSP_UART_Printf(" %02X", req[i]);
+  }
+  Put(" (via ISO-TP 0x7E0)\r\n");
+
+  if (Uds_ClientRequest(req, len) != ISOTP_OK)
+  {
+    Put("diag: busy (previous request pending)\r\n");
+  }
+}
+#endif
 
 /**
   * @brief  tick命令：启动非阻塞PE0采样器（30次x100ms，主循环持续运行）

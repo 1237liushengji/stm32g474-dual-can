@@ -315,6 +315,37 @@ python can_console.py -p COM5     # 连接（COM号换成实际值）
 | 独立看门狗IWDG | LSI/32=1kHz、3s超时，主循环喂狗；调试器halt时冻结 | 主循环卡死3s内自动复位（可注释喂狗语句实验） |
 | 上电自检 | 内部回环自发自收验证FDCAN软件链路，不驱动总线 | 上电串口第二行`CAN self-test: PASS` |
 
+## 8.6 ISO-TP + UDS诊断栈（feature/isotp-uds分支，v3.0）
+
+**架构**：板A=诊断仪（UDS客户端），板B=ECU（UDS服务器），请求/应答ID为
+0x7E0/0x7E8（汽车OBD常用地址对），经**自研ISO 15765-2传输层**承载
+（`Drivers/User/Src/isotp.c`：SF/FF/CF/FC完整状态机、SN校验、STmin节拍、
+N_Bs/N_Cr超时、全非阻塞）。
+
+**UDS服务**（`uds.c`，对标driftregion/iso14229精简实现）：
+
+| 服务 | 功能 | 演示 |
+|------|------|------|
+| 0x10 | 会话控制（默认/扩展，S3超时5s回退） | `diag ext` / `diag def` |
+| 0x22 | 读DID：F000版本串(16B多帧)/F001运行时间/F002通信统计/F010 LED | `diag ver`（**多帧应答，完整验证ISO-TP**） |
+| 0x2E | 写DID F010控制板B的LED（**仅扩展会话**，否则NRC 0x22） | `diag ext`后`diag led 1` |
+| 0x19 | 读DTC（bus-off/错误被动/协议错误合成为故障码） | `diag dtc` |
+| 0x3E | TesterPresent在线保持 | `diag tp` |
+| NRC | 0x11/0x12/0x31/0x22否定应答 | `diag raw 22 F0 FF`（未知DID→NRC 31） |
+
+**演示流程**（板A串口）：
+```
+> diag ver      # 62 F000 "G474-CAN v3.0"（多帧经ISO-TP拼装）
+> diag dtc      # 59 01 ...故障码列表
+> diag led 1    # 默认会话 -> NRC 22（条件不满足）
+> diag ext      # 50 03 ...
+> diag led 1    # 6E F0 10（板B蓝灯点亮）
+> diag up / diag stat / diag raw 22 F0 01
+```
+配合板B `sniff on`可同时观察0x7E0/0x7E8上SF/FF/CF/FC的原始帧交互——
+**一条16字节的版本读取在总线上呈现为FF+FC+CF×2的完整协商过程**，
+是讲解ISO 15765-2的最佳现场教具。
+
 ## 9. 参考资料
 
 * ST官方示例（本工程驱动模式来源）：

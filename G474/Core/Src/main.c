@@ -39,6 +39,8 @@
 #include "can.h"
 #include "bsp_uart.h"
 #include "console.h"
+#include "isotp.h"
+#include "uds.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -135,6 +137,10 @@ static void App_HandleCmd(void)
 static void App_HandleRx(void)
 {
   g_dbgHx++;
+
+  /* 诊断路由：ISO-TP模块按自身rxId过滤，非诊断帧直接忽略 */
+  IsoTp_OnCanFrame(s_rxMsg.id, s_rxMsg.data, s_rxMsg.len);
+
 #if (CAN_DEBUG_SELFTEST != 0)
   /* 单板自测试：回环收到自己发的命令帧，同时扮演两个节点 */
   if (s_rxMsg.id == CAN_ID_CMD_A2B)
@@ -267,6 +273,20 @@ static void App_Process(void)
 /* USER CODE END 0 */
 
 /**
+  * @brief  应用层LED钩子（uds.c的0x2E服务调用）：状态驱动+BSRR原子直写
+  */
+void App_SetLed(uint8_t on)
+{
+  s_bLedState = (on != 0U) ? 1U : 0U;
+  GPIOE->BSRR = (on != 0U) ? GPIO_BSRR_BR0 : GPIO_BSRR_BS0;   /* 低电平点亮 */
+}
+
+uint8_t App_GetLed(void)
+{
+  return s_bLedState;
+}
+
+/**
   * @brief  The application entry point.
   * @retval int
   */
@@ -318,6 +338,8 @@ int main(void)
     BSP_UART_Send("CAN self-test: FAIL\r\n", 21U);
   }
 
+  Uds_Init();                                      /* ISO-TP+UDS诊断栈（角色自动分配） */
+
   /* 独立看门狗：主循环喂狗；调试器halt时冻结计数，断点调试不误复位 */
   DBGMCU->APB1FZR1 |= DBGMCU_APB1FZR1_DBG_IWDG_STOP;
   hiwdg.Instance     = IWDG;                       /* HAL经Instance访问寄存器，必须赋值（漏赋=空指针HardFault） */
@@ -342,6 +364,8 @@ int main(void)
     App_Process();
     Console_Task();                                /* 串口命令行控制台 */
     CAN_Task();                                    /* bus-off指数退避恢复调度 */
+    IsoTp_Task();                                  /* ISO-TP：STmin节拍/超时 */
+    Uds_Task();                                    /* UDS：S3会话/客户端超时 */
     HAL_IWDG_Refresh(&hiwdg);                      /* 喂狗（主循环健康证明） */
     /* USER CODE END WHILE */
 

@@ -28,6 +28,7 @@
   ******************************************************************************
   */
 #include "can.h"
+#include "isotp.h"
 
 /*--------------------------------------- 模块配置 --------------------------------------*/
 #define CAN_RX_RING_LEN       16U                     /* 接收环形缓冲深度（2的幂，取模优化） */
@@ -135,7 +136,8 @@ static HAL_StatusTypeDef CAN_Configure(void)
   hfdcan2.Init.DataSyncJumpWidth              = 2U;
   hfdcan2.Init.DataTimeSeg1                   = 7U;
   hfdcan2.Init.DataTimeSeg2                   = 2U;
-  hfdcan2.Init.StdFiltersNbr                  = 1U;
+  /* 过滤器数量：混杂/自检模式1个(全收，多过滤器会重复存帧)；正常模式2个(心跳+诊断) */
+  hfdcan2.Init.StdFiltersNbr                  = (s_promisc || s_loopbackSelfTest) ? 1U : 2U;
   hfdcan2.Init.ExtFiltersNbr                  = 0U;
   hfdcan2.Init.TxFifoQueueMode                = FDCAN_TX_FIFO_OPERATION;
 
@@ -175,6 +177,27 @@ static HAL_StatusTypeDef CAN_Configure(void)
   {
     return status;
   }
+
+#if (CAN_DEBUG_SELFTEST != 0)
+  /* 自测试：单过滤器足够 */
+#else
+  /* 第二过滤器：诊断ID（正常模式；混杂/自检模式下全收已覆盖，避免重复存帧） */
+  if (!s_promisc && !s_loopbackSelfTest)
+  {
+    filterConfig.FilterIndex = 1U;
+#if (CAN_NODE_ROLE == CAN_NODE_A)
+    filterConfig.FilterID1   = ISOTP_DIAG_RESP_ID;      /* 板A接收诊断应答0x7E8 */
+#else
+    filterConfig.FilterID1   = ISOTP_DIAG_REQ_ID;       /* 板B接收诊断请求0x7E0 */
+#endif
+    filterConfig.FilterID2   = 0x7FFU;
+    status = HAL_FDCAN_ConfigFilter(&hfdcan2, &filterConfig);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+  }
+#endif
 
   /* 全局过滤器：混杂/自检模式下非匹配标准/扩展帧一并收入RX FIFO0；正常模式全部拒绝 */
   if (s_promisc || s_loopbackSelfTest)
