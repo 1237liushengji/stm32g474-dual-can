@@ -295,6 +295,7 @@ int main(void)
 
   BSP_UART_Init();                                 /* 控制台串口 USART1 PA9/PA10 115200 8N1 */
   Console_Init();                                  /* 打印横幅，等待命令 */
+  BSP_UART_Send("main: sniff-parallel M2\r\n", 27U); /* main.c构建指纹：无此行=烧的旧main.o */
 
   if (CAN_Init() != HAL_OK)                        /* FDCAN2 + 过滤器 + 中断 + 启动 */
   {
