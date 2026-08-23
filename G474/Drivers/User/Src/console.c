@@ -33,6 +33,12 @@ static uint8_t s_lineLen;
 static char    s_prevChar;                           /* 上一字符（\r\n组合识别） */
 static bool    s_sniffOn;
 
+/* 非阻塞PE0采样器：tick命令启动，Console_Task每100ms采样打印一次，共30次。
+ * 期间主循环持续运行（帧照收、LED照翻），采样反映真实运行状态。 */
+static bool    s_tickActive;
+static uint8_t s_tickCount;
+static uint32_t s_tickLastMs;
+
 /*--------------------------------------- 内部函数 --------------------------------------*/
 static void Put(const char *s);
 static void Console_Execute(char *line);
@@ -70,10 +76,27 @@ void Console_Init(void)
 }
 
 /**
-  * @brief  控制台任务：行编辑 + 命令分发（主循环轮询调用）
+  * @brief  控制台任务：行编辑 + 命令分发 + 非阻塞采样器（主循环轮询调用）
   */
 void Console_Task(void)
 {
+  /* 非阻塞PE0采样器：每100ms打印一位，共30位（期间系统正常运行） */
+  if (s_tickActive)
+  {
+    uint32_t now = HAL_GetTick();
+    if ((now - s_tickLastMs) >= 100U)
+    {
+      s_tickLastMs = now;
+      BSP_UART_Printf("%lu", (unsigned long)(GPIOE->ODR & 1UL));
+      s_tickCount++;
+      if (s_tickCount >= 30U)
+      {
+        s_tickActive = false;
+        Put("\r\nend\r\n");
+      }
+    }
+  }
+
   int16_t c;
 
   while ((c = BSP_UART_GetChar()) >= 0)
@@ -344,18 +367,14 @@ bool Console_SniffEnabled(void)
 }
 
 /**
-  * @brief  tick命令：以100ms间隔连续采样PE0电平30次（3秒=3个翻转周期，
-  *         不可能漏采边沿），直接观察LED翻转是否存在
+  * @brief  tick命令：启动非阻塞PE0采样器（30次x100ms，主循环持续运行）
   */
 static void Cmd_Tick(void)
 {
-  Put("sampling PE0 (bit0 of ODR) every 100ms x30:\r\n");
-  for (uint8_t i = 0U; i < 30U; i++)
-  {
-    BSP_UART_Printf("%lu", (unsigned long)(GPIOE->ODR & 1UL));
-    HAL_Delay(100U);
-  }
-  Put("\r\n");
+  s_tickActive = true;
+  s_tickCount  = 0U;
+  s_tickLastMs = HAL_GetTick();
+  Put("PE0 sampling (30x100ms, non-blocking):\r\n");
 }
 
 /**
