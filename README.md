@@ -1,14 +1,41 @@
-# 7.CAN 双机CAN通信工程（STM32G474VET6 × 2 + SN65HVD230 × 2）
+# STM32G474 双机 CAN 总线通信与 UDS 诊断系统
 
-基于 `1.LED` 例程框架搭建的双板CAN总线通信工程。两块 STM32G474VET6
-开发板通过 CAN 收发器接入同一条 CAN 总线，以经典CAN
-（500 kbit/s）进行命令/应答式双向通信，板载 LED 作为通信状态指示。
+两块 STM32G474VET6 开发板经 SN65HVD230 收发器接入同一条经典 CAN 总线
+（500 kbit/s），演示从**链路层驱动**到**汽车诊断协议栈**的完整实现：
 
-驱动调用模式与位时序结构参照 **ST官方 STM32CubeG4 示例**
-[FDCAN_Classic_Frame_Networking](https://github.com/STMicroelectronics/STM32CubeG4/tree/master/Projects/STM32G474E-EVAL/Examples/FDCAN/FDCAN_Classic_Frame_Networking)
-（本项目 HAL 库版本 V1.2.3，与该示例 API 完全一致）；SN65HVD230 模块接线和
-终端电阻配置参考了 [nopnop2002/Arduino-STM32-CAN](https://github.com/nopnop2002/Arduino-STM32-CAN)
-的实测电路。
+| 层次 | 内容 |
+|------|------|
+| 数据链路层 | FDCAN2 驱动：ID 精确过滤、Tx/Rx FIFO 管理、发送确认、bus-off 自动恢复与指数退避、IWDG |
+| 应用层 | 命令/应答式双向通信、串口控制台、总线监视、Python 迷你 CAN 分析仪 |
+| **传输层** | **自研 ISO-TP（ISO 15765-2）**：SF/FF/CF/FC 完整状态机、SN 序号校验、STmin 节拍、N_Bs/N_Cr 超时、全非阻塞 |
+| **诊断层** | **自研 UDS（ISO 14229）**：`0x10`/`0x19`/`0x22`/`0x2E`/`0x3E` 服务、会话管理与 S3、NRC、DTC 事件合成 |
+
+板 A 扮演**诊断仪**（等价于 CANoe / PCAN-Diag 的角色），板 B 扮演**被诊断的 ECU**，
+使用 **OBD-II 标准诊断地址对 `0x7E0` / `0x7E8`** —— 无需额外诊断硬件，即可完整演示
+UDS 交互，包含**多帧应答的真实分段与流控协商**（FF + FC + CF）。
+
+> 诊断协议栈的设计细节见 [`docs/`](docs/)；驱动调用模式与位时序结构参照 **ST 官方
+> STM32CubeG4 示例** [FDCAN_Classic_Frame_Networking](https://github.com/STMicroelectronics/STM32CubeG4/tree/master/Projects/STM32G474E-EVAL/Examples/FDCAN/FDCAN_Classic_Frame_Networking)
+> （本项目 HAL 库版本 V1.2.3，与该示例 API 完全一致）；SN65HVD230 接线与终端电阻配置
+> 参考了 [nopnop2002/Arduino-STM32-CAN](https://github.com/nopnop2002/Arduino-STM32-CAN)
+> 的实测电路。
+
+---
+
+## 目录
+
+1. [硬件组成与接线](#1-硬件组成与接线)
+2. [通信协议](#2-通信协议)
+3. [时钟与位时序](#3-时钟与位时序)
+4. [软件架构](#4-软件架构)
+5. [编译与烧录](#5-编译与烧录)
+6. [验证方法](#6-验证方法)
+7. [故障排查](#7-故障排查)
+8. [串口控制台与 PC 上位机](#8-串口控制台与-pc-上位机)
+9. [驱动工程化特性](#9-驱动工程化特性)
+10. [ISO-TP 与 UDS 诊断栈](#10-iso-tp-与-uds-诊断栈)
+11. [版本历史](#11-版本历史)
+12. [参考资料](#12-参考资料)
 
 ---
 
@@ -56,7 +83,7 @@ CANH↔CANH、CANL↔CANL、GND↔GND 对接即可，无需外接模块。
                       (模块板载终端电阻，典型120Ω)
 ```
 
-### 1.3 终端电阻（关键！）
+### 1.3 终端电阻
 
 * 常见 SN65HVD230 模块在 CANH–CANL 间**焊有 120Ω 板载电阻**（部分模块带 J1
   跳线选择）。两个节点各提供一个 120Ω，恰好构成总线两端终端，**无需外加电阻**。
@@ -126,7 +153,7 @@ PB12=FDCAN2_RX、PB13=FDCAN2_TX），与本板丝印/引脚图标注一致
 
 ---
 
-## 3. 时钟与位时序（全部参数可核算）
+## 3. 时钟与位时序
 
 系统时钟（沿用LED例程，未改动）：
 
@@ -189,7 +216,7 @@ FDCAN内核时钟 = **PCLK1 = 150MHz**（在 `HAL_FDCAN_MspInit` 中选择，
 
 ---
 
-## 5. 编译与烧录（两板固件不同！）
+## 5. 编译与烧录
 
 1. Keil MDK 打开 `7.CAN/G474/MDK-ARM/G474.uvprojx`。
 2. **编译板A固件**：确认 `Drivers/User/Inc/can.h` 中
@@ -229,7 +256,7 @@ FDCAN内核时钟 = **PCLK1 = 150MHz**（在 `HAL_FDCAN_MspInit` 中选择，
 | A：LED1快闪＋LED2常灭；B：同左 | A的帧根本没上总线 → 查A端收发器供电、跳线帽、PB13(TX)→TXD接线 |
 | A：LED1同步闪；B：LED1灭 | 诡异状态（A不应在无应答时同步）→ 用自测试复验固件 |
 
-### 6.2 调试器验证（Keil Debug → Watch窗口）
+### 6.2 调试器验证
 
 | 变量 | 位置 | 正常值 |
 |------|------|------|
@@ -259,7 +286,7 @@ FDCAN内核时钟 = **PCLK1 = 150MHz**（在 `HAL_FDCAN_MspInit` 中选择，
 
 ---
 
-## 8. 串口控制台与PC上位机（v2.0新增）
+## 8. 串口控制台与 PC 上位机
 
 ### 8.1 连接
 
@@ -273,11 +300,17 @@ Python上位机均可。
 | 命令 | 功能 | 示例 |
 |------|------|------|
 | `help` | 命令列表 | `help` |
-| `version` | 固件版本/节点角色/编译时间/当前波特率 | `version` |
+| `version` | 固件版本 / 节点角色 / 编译时间 / 当前波特率 | `version` |
 | `stats` | 通信统计（tx/rx/错误计数）与运行时间 | `stats` |
 | `bitrate <kbps>` | **运行时切换**总线波特率 125/250/500/1000 | `bitrate 250` |
 | `sniff <on\|off>` | 总线监视模式：接收所有ID并按行打印 | `sniff on` |
 | `send <id> [b..]` | 手动发送一帧（十六进制） | `send 123 AA 55` |
+| `diag <cmd>` | **UDS 诊断（仅板A）**：`ver`/`up`/`stat`/`dtc`/`ext`/`def`/`tp`/`led 0\|1`/`raw <hex>` | `diag ver` |
+| `led` | LED / GPIOE 诊断：寄存器 dump + 翻转测试 | `led` |
+| `tick` | PE0 非阻塞采样器（30 × 100ms），LED 冻结问题排查用 | `tick` |
+
+> `led` 与 `tick` 为调试辅助命令；其中 `tick` 未列入 `help` 输出。
+> `diag` 仅在板A（诊断仪角色）固件中提供，用法见 [第 10 章](#10-iso-tp-与-uds-诊断栈)。
 
 sniff输出格式（可供上位机解析）：`RX <毫秒> <ID> <DLC> <数据...>`
 例如 `RX 12345 321 8 01 02 03 04 05 06 07 08`
@@ -298,14 +331,20 @@ python can_console.py -p COM5     # 连接（COM号换成实际值）
 （`can_log_*.csv`，含主机毫秒时间戳+节点毫秒时间戳，可直接用Excel分析）、
 快捷发帧 `/send 321 11 22`。
 
-### 8.4 演示建议（面试场景）
+### 8.4 演示建议
 
 1. `sniff on` 后观察命令帧0x321/应答帧0x322交替出现，`stats`核对计数；
 2. `bitrate 1000`两板同步切换——LED同步节奏不变（通信未断）；
 3. `/send 456 DE AD BE EF`手动注入一帧，对端sniff立刻显示；
 4. 拔线演示bus-off自动恢复，`stats`里busOff/errPas计数增长可讲错误状态机。
 
-## 8.5 驱动工程化特性（feature/driver-refactor分支）
+> **UDS 诊断演示**（多帧协商、会话权限、DTC 故障码）见
+> [第 10 章](#10-iso-tp-与-uds-诊断栈) 与
+> [诊断演示与验收手册](docs/03-诊断演示与验收手册.md)。
+
+## 9. 驱动工程化特性
+
+v2.1 阶段对 FDCAN 驱动的工程化改造，以下特性均可通过 `stats` 命令直接观察：
 
 | 特性 | 说明 | 观察方法 |
 |------|------|------|
@@ -315,14 +354,26 @@ python can_console.py -p COM5     # 连接（COM号换成实际值）
 | 独立看门狗IWDG | LSI/32=1kHz、3s超时，主循环喂狗；调试器halt时冻结 | 主循环卡死3s内自动复位（可注释喂狗语句实验） |
 | 上电自检 | 内部回环自发自收验证FDCAN软件链路，不驱动总线 | 上电串口第二行`CAN self-test: PASS` |
 
-## 8.6 ISO-TP + UDS诊断栈（feature/isotp-uds分支，v3.0）
+## 10. ISO-TP 与 UDS 诊断栈
 
-**架构**：板A=诊断仪（UDS客户端），板B=ECU（UDS服务器），请求/应答ID为
-0x7E0/0x7E8（汽车OBD常用地址对），经**自研ISO 15765-2传输层**承载
-（`Drivers/User/Src/isotp.c`：SF/FF/CF/FC完整状态机、SN校验、STmin节拍、
-N_Bs/N_Cr超时、全非阻塞）。
+v3.0 阶段新增。板A 扮演**诊断仪**，板B 扮演**ECU**，在经典 CAN 之上实现完整的
+汽车诊断协议栈。
 
-**UDS服务**（`uds.c`，对标driftregion/iso14229精简实现）：
+### 10.1 架构
+
+请求/应答 ID 为 `0x7E0`/`0x7E8`（汽车 OBD 常用地址对），经**自研 ISO 15765-2 传输层**
+承载（`Drivers/User/Src/isotp.c`：SF/FF/CF/FC 完整状态机、SN 校验、STmin 节拍、
+N_Bs/N_Cr 超时、全非阻塞）。
+
+```
+UDS  服务层   uds.c      0x10 / 0x19 / 0x22 / 0x2E / 0x3E
+     传输层   isotp.c    SF / FF / CF / FC 分段与重组
+     链路层   can.c      FDCAN2（经典 CAN 500 kbit/s）
+```
+
+### 10.2 UDS 服务
+
+（`uds.c`，对标 driftregion/iso14229 精简实现）
 
 | 服务 | 功能 | 演示 |
 |------|------|------|
@@ -333,7 +384,9 @@ N_Bs/N_Cr超时、全非阻塞）。
 | 0x3E | TesterPresent在线保持 | `diag tp` |
 | NRC | 0x11/0x12/0x31/0x22否定应答 | `diag raw 22 F0 FF`（未知DID→NRC 31） |
 
-**演示流程**（板A串口）：
+### 10.3 演示流程
+
+板A串口：
 ```
 > diag ver      # 62 F000 "G474-CAN v3.0"（多帧经ISO-TP拼装）
 > diag dtc      # 59 01 ...故障码列表
@@ -346,7 +399,7 @@ N_Bs/N_Cr超时、全非阻塞）。
 **一条16字节的版本读取在总线上呈现为FF+FC+CF×2的完整协商过程**，
 是讲解ISO 15765-2的最佳现场教具。
 
-### 详细设计文档（`docs/`）
+### 10.4 详细设计文档
 
 | # | 文档 | 内容 |
 |---|------|------|
@@ -354,7 +407,16 @@ N_Bs/N_Cr超时、全非阻塞）。
 | 02 | [UDS 诊断栈设计](docs/02-UDS诊断栈设计.md) | 服务清单与请求/应答字节、DID 表、会话管理与 S3、NRC 对照、DTC 合成规则、客户端保活机制、API 与简化说明 |
 | 03 | [诊断演示与验收手册](docs/03-诊断演示与验收手册.md) | 接线与双角色烧录、命令清单、六步演示流程与预期输出、边界异常场景、故障演练、13 项验收清单、3 分钟面试演示脚本 |
 
-## 9. 参考资料
+## 11. 版本历史
+
+| 版本 | 日期 | 主要内容 |
+|------|------|----------|
+| v2.0 | 2026-08-22 | 基线：双机 CAN 命令/应答通信、串口控制台、总线监视、Python 上位机 |
+| v2.1 | 2026-08-23 | 驱动工程化：RX 无锁环形缓冲、Tx Event 发送确认、bus-off 指数退避、IWDG、上电自检 |
+| **v3.0** | **2026-08-23** | **ISO-TP（ISO 15765-2）传输层 + UDS（ISO 14229）诊断栈**：`0x10`/`0x19`/`0x22`/`0x2E`/`0x3E`、会话管理与 S3、NRC、DTC 事件合成、`diag` 控制台 |
+| — | 2026-09-10 | 添加 MIT License；补充 [`docs/`](docs/) 三份设计文档 |
+
+## 12. 参考资料
 
 * ST官方示例（本工程驱动模式来源）：
   [STM32CubeG4 FDCAN_Classic_Frame_Networking](https://github.com/STMicroelectronics/STM32CubeG4/tree/master/Projects/STM32G474E-EVAL/Examples/FDCAN/FDCAN_Classic_Frame_Networking)
